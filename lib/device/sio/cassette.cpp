@@ -1053,40 +1053,26 @@ size_t sioCassette::send_QROS_tape_block(size_t offset)
 
     if (is_turbo && gap > 0)
     {
+        // Wait for motor ON before sending turbo data.
+        // After boot, the QROS loader displays program name and waits
+        // for user to press START. Motor is OFF during this wait.
+        if (has_pulldown() && !motor_line())
+        {
+            Debug_println("QROS: waiting for motor ON (user START key)");
+            while (!motor_line())
+            {
+                fnSystem.delay(10);
+            }
+            Debug_println("QROS: motor ON, proceeding");
+        }
+
         // Turbo block: generate pilot tone (GPIO HIGH) during IRG
         qros_pilot_on();
-
-        uint64_t motor_off_start = 0;
-        bool motor_was_off = false;
 
         while (gap)
         {
             gap--;
             fnSystem.delay_microseconds(999);
-
-            // Check motor line — abort if motor OFF for > 1 second
-            if (has_pulldown())
-            {
-                if (!motor_line())
-                {
-                    if (!motor_was_off)
-                    {
-                        motor_was_off = true;
-                        motor_off_start = fnSystem.millis();
-                    }
-                    else if ((fnSystem.millis() - motor_off_start) > 1000)
-                    {
-                        Debug_println("QROS: motor OFF > 1s during pilot, aborting");
-                        qros_pilot_off();
-                        fnLedManager.set(eLed::LED_BUS, false);
-                        return starting_offset;
-                    }
-                }
-                else
-                {
-                    motor_was_off = false;
-                }
-            }
         }
 
         qros_pilot_off();
