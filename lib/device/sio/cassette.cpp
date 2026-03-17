@@ -516,7 +516,10 @@ void sioCassette::check_for_FUJI_file()
             scan_offset += sizeof(struct tape_FUJI_hdr) + len;
         }
 
-        // If FUJI file but no T2K detected, scan for QROS turbo (baud > 600)
+        // If FUJI file but no T2K detected, scan for QROS turbo (baud > 3000)
+        // QROS turbo uses 6580-6595 (AUDF=127) or 9535-9622 (AUDF=86).
+        // Lower bauds (600, 854, 1000 etc.) are standard/KSO and handled
+        // by the normal FUJI path.
         if (!tape_flags.turbo2000)
         {
             bool has_600_boot = false;
@@ -533,7 +536,7 @@ void sioCassette::check_for_FUJI_file()
                     {
                         has_600_boot = true;
                     }
-                    else
+                    else if (hdr->irg_length > 3000)
                     {
                         tape_flags.qros = 1;
                         qros_turbo_baud = hdr->irg_length;
@@ -999,7 +1002,7 @@ size_t sioCassette::send_QROS_tape_block(size_t offset)
     uint16_t gap, len;
     struct tape_FUJI_hdr *hdr = (struct tape_FUJI_hdr *)atari_sector_buffer;
     uint8_t *p = hdr->chunk_type;
-    bool is_turbo = (baud > 600);
+    bool is_turbo = (baud > 3000);
 
     // Send embedded boot loader on first call (if CAS has no own 600 Bd boot)
     if (!qros_boot_sent)
