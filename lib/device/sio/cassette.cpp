@@ -340,6 +340,8 @@ void sioCassette::sio_disable_cassette()
 #ifdef ESP_PLATFORM
             if (_rmt_active)
                 turbo2000_deinit_rmt();
+            if (_qros_pilot_active)
+                qros_pilot_off();
 #endif
             SYSTEM_BUS.setBaudrate(SIO_STANDARD_BAUDRATE);
         }
@@ -358,6 +360,8 @@ void sioCassette::sio_handle_cassette()
     {
         if (tape_flags.turbo2000)
             tape_offset = send_turbo2000_tape_block(tape_offset);
+        else if (tape_flags.qros)
+            tape_offset = send_QROS_tape_block(tape_offset);
         else if (tape_flags.FUJI)
             tape_offset = send_FUJI_tape_block(tape_offset);
         else
@@ -475,6 +479,7 @@ void sioCassette::check_for_FUJI_file()
 
     tape_flags.FUJI = 0;
     tape_flags.turbo2000 = 0;
+    tape_flags.qros = 0;
 
     fnio::fseek(_file, 0, SEEK_SET);
     fnio::fread(atari_sector_buffer, 1, sizeof(struct tape_FUJI_hdr), _file);
@@ -483,8 +488,10 @@ void sioCassette::check_for_FUJI_file()
         tape_flags.FUJI = 1;
         Debug_println("FUJI File Found");
 
+        uint16_t fuji_chunk_length = hdr->chunk_length; // save before scans clobber buffer
+
         // Scan first few chunks to detect Turbo 2000 PWM format
-        size_t scan_offset = sizeof(struct tape_FUJI_hdr) + hdr->chunk_length;
+        size_t scan_offset = sizeof(struct tape_FUJI_hdr) + fuji_chunk_length;
         while (scan_offset < filesize && scan_offset < 256)
         {
             fnio::fseek(_file, scan_offset, SEEK_SET);
@@ -506,6 +513,30 @@ void sioCassette::check_for_FUJI_file()
                 break;
 
             scan_offset += sizeof(struct tape_FUJI_hdr) + len;
+        }
+
+        // If FUJI file but no T2K detected, scan for QROS turbo (baud > 600)
+        if (!tape_flags.turbo2000)
+        {
+            scan_offset = sizeof(struct tape_FUJI_hdr) + fuji_chunk_length;
+            while (scan_offset < filesize)
+            {
+                fnio::fseek(_file, scan_offset, SEEK_SET);
+                fnio::fread(atari_sector_buffer, 1, sizeof(struct tape_FUJI_hdr), _file);
+                uint16_t clen = hdr->chunk_length;
+
+                if (p[0] == 'b' && p[1] == 'a' && p[2] == 'u' && p[3] == 'd')
+                {
+                    if (hdr->irg_length > 600)
+                    {
+                        tape_flags.qros = 1;
+                        Debug_printf("QROS turbo format detected (baud=%u)\n", hdr->irg_length);
+                        break;
+                    }
+                }
+
+                scan_offset += sizeof(struct tape_FUJI_hdr) + clen;
+            }
         }
     }
     else
@@ -743,6 +774,190 @@ uint8_t sioCassette::decode_fsk()
     // Debug_printf("%lu, ", fnSystem.micros());
     // Debug_printf("%u\n", out);
     return out;
+}
+
+// =============================================================================
+// QROS turbo cassette playback
+// =============================================================================
+
+#ifdef ESP_PLATFORM
+void sioCassette::qros_pilot_on()
+{
+    if (_qros_pilot_active)
+        return;
+
+    // Flush pending UART output before detaching
+    SYSTEM_BUS.flushOutput();
+
+    // Detach UART2 TX from GPIO — same pattern as T2K init_rmt
+    esp_rom_gpio_connect_out_signal(PIN_UART2_TX, SIG_GPIO_OUT_IDX, false, false);
+
+    // Set GPIO HIGH = pilot tone (sustained mark level on SIO DATA IN)
+    gpio_set_direction((gpio_num_t)PIN_UART2_TX, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)PIN_UART2_TX, 1);
+
+    _qros_pilot_active = true;
+    Debug_println("QROS: pilot ON (GPIO HIGH)");
+}
+
+void sioCassette::qros_pilot_off()
+{
+    if (!_qros_pilot_active)
+        return;
+
+    // Reattach UART2 TX to GPIO — same pattern as T2K deinit_rmt
+    esp_rom_gpio_connect_out_signal(PIN_UART2_TX,
+        uart_periph_signal[2].pins[SOC_UART_TX_PIN_IDX].signal, false, false);
+
+    _qros_pilot_active = false;
+    Debug_println("QROS: pilot OFF (UART reattached)");
+}
+#endif
+
+size_t sioCassette::send_QROS_tape_block(size_t offset)
+{
+#ifdef ESP_PLATFORM
+    size_t r;
+    uint16_t gap, len;
+    struct tape_FUJI_hdr *hdr = (struct tape_FUJI_hdr *)atari_sector_buffer;
+    uint8_t *p = hdr->chunk_type;
+    bool is_turbo = (baud > 600);
+
+    size_t starting_offset = offset;
+
+    while (offset < filesize)
+    {
+        Debug_printf("QROS offset: %u\r\n", (unsigned)offset);
+        fnio::fseek(_file, offset, SEEK_SET);
+        fnio::fread(atari_sector_buffer, 1, sizeof(struct tape_FUJI_hdr), _file);
+        len = hdr->chunk_length;
+
+        if (p[0] == 'd' && p[1] == 'a' && p[2] == 't' && p[3] == 'a')
+        {
+            block++;
+            break;
+        }
+        else if (p[0] == 'b' && p[1] == 'a' && p[2] == 'u' && p[3] == 'd')
+        {
+            baud = hdr->irg_length;
+            is_turbo = (baud > 600);
+            Debug_printf("QROS baud change: %u (turbo=%d)\n", baud, is_turbo);
+        }
+        else if (p[0] == 'f' && p[1] == 's' && p[2] == 'k')
+        {
+            // FSK chunk — skip (digital playback ignores FSK settings)
+            Debug_println("QROS: skipping fsk chunk");
+        }
+
+        offset += sizeof(struct tape_FUJI_hdr) + len;
+    }
+
+    if (offset >= filesize)
+    {
+        Debug_println("QROS: end of tape");
+        return 0;
+    }
+
+    gap = hdr->irg_length;
+    len = hdr->chunk_length;
+    Debug_printf("QROS block %u: baud=%u len=%u gap=%u turbo=%d\n",
+                 block, baud, len, gap, is_turbo);
+
+    fnLedManager.set(eLed::LED_BUS, true);
+
+    if (is_turbo && gap > 0)
+    {
+        // Turbo block: generate pilot tone (GPIO HIGH) during IRG
+        qros_pilot_on();
+
+        uint64_t motor_off_start = 0;
+        bool motor_was_off = false;
+
+        while (gap)
+        {
+            gap--;
+            fnSystem.delay_microseconds(999);
+
+            // Check motor line — abort if motor OFF for > 1 second
+            if (has_pulldown())
+            {
+                if (!motor_line())
+                {
+                    if (!motor_was_off)
+                    {
+                        motor_was_off = true;
+                        motor_off_start = fnSystem.millis();
+                    }
+                    else if ((fnSystem.millis() - motor_off_start) > 1000)
+                    {
+                        Debug_println("QROS: motor OFF > 1s during pilot, aborting");
+                        qros_pilot_off();
+                        fnLedManager.set(eLed::LED_BUS, false);
+                        return starting_offset;
+                    }
+                }
+                else
+                {
+                    motor_was_off = false;
+                }
+            }
+        }
+
+        qros_pilot_off();
+
+        // Set turbo baud rate for data transmission
+        SYSTEM_BUS.setBaudrate(baud);
+    }
+    else
+    {
+        // Standard 600 baud block: normal IRG delay (no pilot)
+        while (gap)
+        {
+            gap--;
+            fnSystem.delay_microseconds(999);
+
+            if (has_pulldown() && !motor_line() && gap > 1000)
+            {
+                fnLedManager.set(eLed::LED_BUS, false);
+                return starting_offset;
+            }
+        }
+
+        SYSTEM_BUS.setBaudrate(baud);
+    }
+
+    fnLedManager.set(eLed::LED_BUS, false);
+    Debug_printf("QROS: sending block %u\n", block);
+
+    // Send data
+    if (offset < filesize)
+    {
+        uint16_t buflen;
+        offset += sizeof(struct tape_FUJI_hdr);
+
+        while (len)
+        {
+            buflen = (len > 256) ? 256 : len;
+            len -= buflen;
+
+            fnio::fseek(_file, offset, SEEK_SET);
+            r = fnio::fread(atari_sector_buffer, 1, buflen, _file);
+            offset += r;
+
+            Debug_printf("QROS: sending %u bytes\r\n", buflen);
+            SYSTEM_BUS.write(atari_sector_buffer, buflen);
+            SYSTEM_BUS.flushOutput();
+        }
+    }
+    else
+    {
+        offset = 0;
+    }
+
+    return offset;
+#else
+    return 0;
+#endif
 }
 
 // =============================================================================

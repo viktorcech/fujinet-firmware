@@ -129,6 +129,7 @@ private:
         unsigned char FUJI : 1;
         unsigned char turbo : 1;
         unsigned char turbo2000 : 1;
+        unsigned char qros : 1;
     } tape_flags;
 
     uint8_t atari_sector_buffer[256];
@@ -142,6 +143,14 @@ private:
     void check_for_FUJI_file();
     size_t send_FUJI_tape_block(size_t offset);
     size_t receive_FUJI_tape_block(size_t offset);
+
+    // QROS turbo cassette support
+    size_t send_QROS_tape_block(size_t offset);
+#ifdef ESP_PLATFORM
+    void qros_pilot_on();   // detach UART TX, set GPIO HIGH for pilot tone
+    void qros_pilot_off();  // reattach UART TX
+    bool _qros_pilot_active = false;
+#endif
 
     // Turbo 2000 PWM cassette support
     uint16_t t2k_pilot_half  = 726;   // pilot pulse half-period in µs
