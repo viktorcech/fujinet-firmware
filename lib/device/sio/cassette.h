@@ -145,7 +145,10 @@ private:
     size_t receive_FUJI_tape_block(size_t offset);
 
     // QROS turbo cassette support
+    bool qros_boot_sent = false;       // boot loader already sent?
+    uint16_t qros_turbo_baud = 6580;   // turbo baud rate from CAS
     size_t send_QROS_tape_block(size_t offset);
+    void send_QROS_boot_loader();
 #ifdef ESP_PLATFORM
     void qros_pilot_on();   // detach UART TX, set GPIO HIGH for pilot tone
     void qros_pilot_off();  // reattach UART TX
