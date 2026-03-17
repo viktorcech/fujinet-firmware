@@ -919,31 +919,33 @@ void sioCassette::send_QROS_boot_loader()
     Debug_printf("QROS boot: Stage 1 sent (cksum=0x%02X)\n", buf[BLOCK_LEN + 3]);
 
     // --- Stage 2: turbo baud with pilot ---
+    // Original CAS flow after Stage 1 boot record:
+    //   baud 6580 → data 40B IRG=0 (ident) → data 883B IRG=156 (Stage 2)
+    // On tape: ident bytes are noise (Stage 1 is in pilot detection,
+    // UART start bits reset its counter). The 156ms gap before Stage 2
+    // is the actual pilot tone (sustained HIGH). Stage 1 needs ~17ms
+    // (2560 consecutive HIGH reads) to detect pilot, then sets up POKEY
+    // async receive for exactly 883 bytes into $0700-$0A72.
 #ifdef ESP_PLATFORM
-    // Stage 1 needs time to set up POKEY and start listening for pilot
+    // Stage 1 needs time to start executing after boot record
     fnSystem.delay(100);
-
-    // Pilot tone for ident text (sustained HIGH)
-    qros_pilot_on();
-    // Short pilot — ident is sent immediately after Stage 1 in original CAS (IRG=0)
-    // but we need some pilot for Stage 1 to detect
-    fnSystem.delay(200);
-    qros_pilot_off();
 
     // Switch to turbo baud
     SYSTEM_BUS.setBaudrate(qros_turbo_baud);
 
-    // Send ident text (40 bytes)
+    // Send ident text as noise — Stage 1 is in pilot detection mode,
+    // UART data (with LOW start bits) resets its pilot counter.
     SYSTEM_BUS.write(qros_ident_text, sizeof(qros_ident_text));
     SYSTEM_BUS.flushOutput();
-    Debug_println("QROS boot: ident text sent");
+    Debug_println("QROS boot: ident text sent (noise for Stage 1)");
 
-    // Pilot before Stage 2 (IRG = 156ms from original CAS)
+    // Pilot tone = sustained HIGH. Stage 1 detects pilot here.
+    // Original CAS has 156ms, we use 200ms for safety margin.
     qros_pilot_on();
-    fnSystem.delay(156);
+    fnSystem.delay(200);
     qros_pilot_off();
 
-    // Send Stage 2 main loader (883 bytes)
+    // Send Stage 2 main loader (883 bytes into $0700-$0A72)
     SYSTEM_BUS.write(qros_stage2_loader, sizeof(qros_stage2_loader));
     SYSTEM_BUS.flushOutput();
     Debug_printf("QROS boot: Stage 2 sent (%u bytes)\n", (unsigned)sizeof(qros_stage2_loader));
